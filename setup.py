@@ -7,7 +7,7 @@ except ImportError:
 
 setup(
     name='of',
-    version='0.1.0',
+    version='0.2.3',
     description='object-query mapping for Postgres',
     author='Aurynn Shaw',
     author_email='aurynn@gmail.com',
