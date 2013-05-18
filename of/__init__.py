@@ -1,13 +1,7 @@
 import psycopg2
 from psycopg2 import extras
 from string import Formatter as f
-
-
-def render (string, context):
-
-    # Returns a string rendered against a context.
-    # 
-    pass
+import types
 
 class wrapper(object):
 
@@ -97,11 +91,11 @@ class Of(object):
         selfobj = None
         if isinstance(ctx, Base):
             # Are we being called in a Self mode?
-            print "in self mode"
+            # print "in self mode"
             selfobj = ctx
             ctx = { "self": ctx }
         # print "query is %s" % query
-            print ctx["self"].__row__
+            # print ctx["self"].__row__
         for (text, key, spec, conversion ) in fo.parse( query ):
             # Text is the current bit lead up.
             # key is what we're going to need to replace.
@@ -116,7 +110,7 @@ class Of(object):
                 # (value, used) = fo.vformat(key, [], ctx)
                 # value = fo.vformat("{%s}" % key, [], ctx)
                 (value, used_key) = fo.get_field(key, [], ctx)
-            except KeyError:
+            except KeyError as excepted:
                 # Well that's bad
                 if not selfobj:
                     raise FormatError("Can't find %s in context of %s" % (key, type_))
@@ -124,7 +118,12 @@ class Of(object):
                     # If we're being called in a 'self'-style context, we need to 
                     # This is also terribly wrong, wtf
                     # new_val = getattr(ctx["self"], key)
-                    (value, used_key) = fo.get_field(key, [], ctx["self"])
+                    try:
+                        ctx["self"]
+                        (value, used_key) = fo.get_field(key, [], ctx["self"])
+                    except Exception, e:
+                        print "Couldn't find self in ctx"
+                        raise excepted
                 except AttributeError:
                     raise FormatError("Can't find %s in context of %s" % (key, selfobj.__class__.__name__))
 
@@ -132,8 +131,8 @@ class Of(object):
             args[ key ] = value
 
         cur = self.conn.cursor(cursor_factory=extras.DictCursor)
-        print new_query
-        print args
+        # print new_query
+        # print args
         r = cur.execute(new_query, args)
         if r:
             raise psycopg2.ProgrammingError("query error: %s" % r)
@@ -144,7 +143,10 @@ class Of(object):
                     break
                 for row in rows:
                     # print "Got a row, it's %s" % row
-                    yield type_.from_db(row, ctx)
+                    t = type_(row, ctx)
+                    t._from_db = True
+                    yield t
+                    # yield type_.from_db(row, ctx)
             except psycopg2.ProgrammingError as e:
                 return # return NOTHING.
         return
@@ -166,40 +168,107 @@ class _Magic(type):
 
         # If we haven't defined a way for our stuff to be updated at the DB 
         # layer, rip out the save function entirely.
-        print "got name %s" % name
-        print "got bases %s" % bases
-        print "got dict %s" % dict_
+        # print "got name %s" % name
+        # print "got bases %s" % bases
+        # print "got dict %s" % dict_
         if "__create__" in dict_ or "__update__" in dict_:
-            print "Adding save method"
+            # print "Adding save method"
             if dict_.get("save", None):
                 # Well that's odd.
                 print "WELL THAT'S ODD"
             else:
                 dict_["save"] = _save # Re-bind the method
 
+        if "__fetch__" in dict_:
+            dict_["fetch"] = _fetch
+
         x = super(_Magic, cls).__new__(cls, name, bases, dict_)
         # x = type(name, bases, dict_)
         #x = type(name, bases, dict_)
-        print "In magic, classname is %s" % x.__class__.__name__
+        # print "In magic, classname is %s" % x.__class__.__name__
         return x
 
 def _save(self):
 
     query = None
+    querytype = None
+    print "update: %s" % self.__update__
+    print "create: %s" % self.__create__
     if self.__row__ and self.__dirty__ and self._from_db:
         # Update query, if there was an originating dict and the 
+        querytype = 1
         query = self.__update__
-    if not self._from_db and self.__row__:
+    elif not self._from_db and self.__row__:
+        querytype = 0
         query = self.__create__
     elif self.__dirty__:
+        querytype = 0
         query = self.__create__
+
     if isinstance(query, (list, tuple)):
         query = query[0] # Just use the first
 
     if not query:
         raise AttributeError("save is not defined")
 
-    return conn.query(query, self)
+    try:
+        gen = conn.query(query, self)
+    except psycopg2.IntegrityError as e:
+        # were we using the create query?
+        if not querytype:
+            raise
+        query = self.__update__
+        gen = conn.query(query, self)
+    if not isinstance(gen, types.GeneratorType):
+        return gen
+    # otherwise
+    try:
+        for i in gen:
+            return i
+    except psycopg2.IntegrityError:
+        print "FAILURE"
+        if querytype:
+            raise
+        print "nq now %s" % self.__update__
+        nq = self.__update__
+        # Roll back
+        conn.conn.rollback()
+        for i in conn.query(nq, self):
+            conn.conn.commit()
+            return i
+
+def _fetch(self):
+    """Populates the object with data from the DB.
+       Requires a load query.
+       If only there was, you know, a query generator here.
+    """
+    dct = self.__dirty__ or self.__row__
+    query = self.__fetch__
+    query += " WHERE "
+    args = []
+    for key in dct.keys():
+        q = "%s = " % key
+        q += "{self." + key + "}" # Use the existing lookup stuff, since these are already in self.
+        args.append(q)
+    
+    query += " AND ".join(args) # whee
+
+    res = conn.query(query, self)
+    # res is a generator
+    this = None # This becomes the new core of our data
+    try:
+        for this in res: 
+            break # One pass only
+    except TypeError:
+        return False
+
+    if this and dict( this ):
+        self.__row__ = dict( this )
+        self._from_db = True # We're now known to be from the DB
+        conn.conn.rollback()
+        return True
+    else:
+        return False
 
 class Base(object):
 
@@ -212,12 +281,12 @@ class Base(object):
         obj.__dirty__ = {}
         obj.__row__ = {}
         obj._from_db = False
-        print dir(obj)
+        # print dir(obj)
         return obj
 
     def __init__(self, dict_, context=None):
-        print "Init!"
-        print "Dict is %s" % dict_
+        # print "Init!"
+        # print "Dict is %s" % dict_
         self.__row__ = dict_
         self.__dirty__ = {}
         self.ctx = context
