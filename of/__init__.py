@@ -21,6 +21,7 @@ class Of(object):
     def __init__(self, params):
         # Where do the connection args come from?
         self.conn = psycopg2.connect(**params) # args here
+        psycopg2.extras.register_hstore(self.conn, globally=True)
         self.__queries = set()
         self.__stored = {}
 
@@ -366,7 +367,6 @@ class Base(object):
         #     return object.__setattr__(self, key, value)
         # # return setattr(super(Base, self), key, value)
         # return object.__setattr__(self, key, value)
-
 
 
 class FormatError(BaseException): pass
